@@ -1,63 +1,63 @@
+"""Активные объекты для работы с базой данных"""
 import copy
-from active_objects import ActiveObjectWithRetries, ActiveObjectsController
+from typing import Optional, Set, Any, Dict, List
 
-class DbObject:
-    pass
+from .active_objects import ActiveObjectWithRetries, ActiveObjectsController
+
 
 class DbObject(ActiveObjectWithRetries):
     """
-    A task object corresponding to the record in table_name table
+    Активный объект, соответствующий записи в таблице БД
     """
-    #table_name
-    #table_key_fields = ['id']
-    #table_fields = ['active', 'locked_until', 'stop']
-    #notify_key = '!' + table_name
-    #_changed = set()
-    #_deleted = set()
-    
-    table_name = None    
+    table_name = None
     table_key_fields = ['id']
     table_fields = None
     version_field_name = None
+    notify_key = None
+    _changed: Set = set()
+    _deleted: Set = set()
 
-    def __init__(self, controller:ActiveObjectsController, id):
-        super().__init__(controller, id)
-        self.__old_db_state__ = None # last known DB state
-        self.db_state = None # current state
-        self.changed_fields = set()
-        self.is_deleted = True
+    def __init__(self, controller: ActiveObjectsController, obj_id):
+        super().__init__(controller, obj_id)
+        self.__old_db_state__: Optional[Dict] = None
+        self.db_state: Optional[Dict] = None
+        self.changed_fields: Set[str] = set()
+        self.is_deleted: bool = True
 
     @classmethod
-    def cast_id(cls, id):
-        return id
-    
+    def cast_id(cls, obj_id):
+        """Преобразовать ID к нужному типу"""
+        return obj_id
+
     @classmethod
-    def parse_id(cls, s:str):
-        return int(s)           
-        
-    def set_field(self, name:str, value, set_changed:bool=True):
+    def parse_id(cls, s: str):
+        """Разобрать ID из строки"""
+        return int(s)
+
+    def set_field(self, name: str, value: Any, set_changed: bool = True) -> bool:
+        """Установить значение поля"""
         if self.db_state is None:
-            raise Exception("Can`t set field: self.db_state is None")
-        try:
-            cur = self.db_state[name]
-            if cur is value or cur == value:
-                return False
-        except KeyError:
-            pass
+            raise Exception("Can't set field: self.db_state is None")
+        cur = self.db_state.get(name)
+        if cur is value or cur == value:
+            return False
         self.db_state[name] = value
         if set_changed:
             self.changed_fields.add(name)
         return True
-    
+
     @classmethod
-    def invalidate_all(cls, controller:ActiveObjectsController):
+    def invalidate_all(cls, controller: ActiveObjectsController):
+        """Инвалидировать все объекты данного типа"""
         controller.for_each_object(cls.type_id, lambda o: o.invalidate())
-    
+
     def invalidate(self):
+        """Инвалидировать объект"""
         pass
 
     def set_deleted(self):
-        if not self.is_deleted:            
+        """Пометить объект как удаленный"""
+        if not self.is_deleted:
             self.info("DELETED")
             self.is_deleted = True
             self.__old_db_state__ = None
@@ -66,13 +66,16 @@ class DbObject(ActiveObjectWithRetries):
             self.invalidate()
             self.signal()
 
-    def set_db_state(self, db_state):
+    def set_db_state(self, db_state: Dict):
+        """Установить состояние из БД"""
         if self.is_deleted:
             self.invalidate()
-            self.is_deleted = False        
-        if self.__old_db_state__ is None \
-        or (self.__class__.version_field_name is not None \
-        and self.__old_db_state__[self.__class__.version_field_name] != db_state[self.__class__.version_field_name]):
+            self.is_deleted = False
+
+        if (self.__old_db_state__ is None or
+            (self.__class__.version_field_name is not None and
+             self.__old_db_state__[self.__class__.version_field_name] !=
+             db_state[self.__class__.version_field_name])):
             self.__old_db_state__ = db_state
             self.db_state = copy.copy(db_state)
             self.changed_fields.clear()
@@ -81,147 +84,183 @@ class DbObject(ActiveObjectWithRetries):
             old = self.db_state
             self.db_state = copy.copy(db_state)
             for n in self.changed_fields:
-                self.db_state[n] = old[n]        
+                self.db_state[n] = old[n]
         self.signal()
-        
+
     @classmethod
-    def refresh_db_states(cls, controller:ActiveObjectsController, cur, expected_ids:set=None) -> bool:
+    def refresh_db_states(cls, controller: ActiveObjectsController, cur,
+                          expected_ids: Optional[Set] = None) -> int:
+        """Обновить состояния объектов из курсора БД"""
         found_ids = set()
         for row in cur.fetchall():
             db_state = get_db_state(cur, row)
-            if len(cls.table_key_fields)==1:
-                id = db_state[cls.table_key_fields[0]]
-            elif len(cls.table_key_fields)==2:
-                id = (db_state[cls.table_key_fields[0]], db_state[cls.table_key_fields[1]])
-            elif len(cls.table_key_fields)==3:
-                id = (db_state[cls.table_key_fields[0]], db_state[cls.table_key_fields[1]], db_state[cls.table_key_fields[2]])
+            if len(cls.table_key_fields) == 1:
+                obj_id = db_state[cls.table_key_fields[0]]
+            elif len(cls.table_key_fields) == 2:
+                obj_id = (db_state[cls.table_key_fields[0]],
+                         db_state[cls.table_key_fields[1]])
+            elif len(cls.table_key_fields) == 3:
+                obj_id = (db_state[cls.table_key_fields[0]],
+                         db_state[cls.table_key_fields[1]],
+                         db_state[cls.table_key_fields[2]])
             else:
-                raise Exception('Not supported') 
-            id = cls.cast_id(id)
-            found_ids.add(id)
-            obj = controller.find(cls.type_id, id)
+                raise Exception('Not supported')
+            obj_id = cls.cast_id(obj_id)
+            found_ids.add(obj_id)
+            obj = controller.find(cls.type_id, obj_id)
             if obj is None and cls.must_be_loaded(db_state):
-                obj = cls(controller, id)
+                obj = cls(controller, obj_id)
             if obj is not None:
                 obj.set_db_state(db_state)
+
         if expected_ids is not None:
-            for id in expected_ids.difference(found_ids):
-                obj = controller.find(cls.type_id, id)
+            for obj_id in expected_ids.difference(found_ids):
+                obj = controller.find(cls.type_id, obj_id)
                 if obj is not None:
                     obj.set_deleted()
-        return len(found_ids)        
+        return len(found_ids)
 
     def refresh_db_state(self, conn):
+        """Обновить состояние объекта из БД"""
         self.__old_db_state__ = None
         with conn.cursor() as cur:
             sql = f"""
-                SELECT {self.__class__.cls.get_select_fields_sql()}
+                SELECT {self.__class__.get_select_fields_sql()}
                 FROM {self.__class__.table_name}
                 WHERE {' and '.join([f + '=%s' for f in self.__class__.table_key_fields])}
             """
-            cur.execute(sql, self.id)
-            self.refresh_db_states(self.controller, cur, set([self.id]))
+            params = [self.id] if isinstance(self.id, (int, str)) else list(self.id)
+            cur.execute(sql, params)
+            self.__class__.refresh_db_states(self.controller, cur, {self.id})
 
     def save_db_state(self, conn):
+        """Сохранить состояние объекта в БД"""
         if len(self.changed_fields) > 0:
             sql = f"""
                 UPDATE {self.__class__.table_name}
                 SET {','.join([n + '=%s' for n in self.changed_fields])}
                 WHERE {' and '.join([f + '=%s' for f in self.__class__.table_key_fields])}
             """
-            values = [self.db_state[n] for n in self.changed_fields] + [self.db_state[n] for n in self.__class__.table_key_fields]
+            values = [self.db_state[n] for n in self.changed_fields]
+            params = [self.id] if isinstance(self.id, (int, str)) else list(self.id)
+            values.extend(params)
+
             if self.__class__.version_field_name is not None:
                 values.append(self.db_state[self.__class__.version_field_name])
-                sql = sql + ' and ' + self.__class__.version_field_name + '=%s'
+                sql = sql + f' and {self.__class__.version_field_name}=%s'
+
             with conn.cursor() as cur:
                 cur.execute(sql, values)
                 self.changed_fields.clear()
                 if cur.rowcount == 0:
-                    self.refresh_db_state()
+                    self.refresh_db_state(conn)
 
-    def info(self, msg:str):
+    def info(self, msg: str):
+        """Записать информационное сообщение"""
         if msg is not None:
-            print(self.type_id + repr(self.id) + ': ' + msg)
+            print(f"{self.type_id}{repr(self.id)}: {msg}")
 
-    def error(self, msg:str):
+    def error(self, msg: str):
+        """Записать сообщение об ошибке"""
         if msg is not None:
-            print(self.type_id + repr(self.id) + '! ' + msg)
-            
-    def must_be_loaded(db_state:map) -> bool:
-        return True            
+            print(f"{self.type_id}{repr(self.id)}! {msg}")
+
+    @classmethod
+    def must_be_loaded(cls, db_state: Dict) -> bool:
+        """Нужно ли загружать объект с данным состоянием"""
+        return True
 
     @classmethod
     def _clear_changes(cls):
+        """Очистить списки изменений"""
         cls._changed.clear()
         cls._deleted.clear()
 
     @classmethod
-    def _add_change(cls, msg:str):
-        if len(msg) > 2 and msg[1] == ' ' and msg[0] in ('I','U','D'):            
-            id = cls.parse_id(msg[2:])
+    def _add_change(cls, msg: str):
+        """Добавить изменение из уведомления БД"""
+        if len(msg) > 2 and msg[1] == ' ' and msg[0] in ('I', 'U', 'D'):
+            obj_id = cls.parse_id(msg[2:])
             if msg[0] == 'D':
-                cls._deleted.add(id)
+                cls._deleted.add(obj_id)
             else:
-                cls._changed.add(id)
-                
-    @classmethod
-    def get_select_fields_sql(cls):
-        return ','.join(cls.table_key_fields + cls.table_fields)        
+                cls._changed.add(obj_id)
 
     @classmethod
-    def _apply_changes(cls, controller:ActiveObjectsController, conn):
+    def get_select_fields_sql(cls) -> str:
+        """Получить SQL для выбора полей"""
+        if cls.table_fields is None:
+            raise Exception("table_fields must be defined")
+        return ','.join(cls.table_key_fields + cls.table_fields)
+
+    @classmethod
+    def _apply_changes(cls, controller: ActiveObjectsController, conn):
+        """Применить изменения из БД"""
         changed = cls._changed.difference(cls._deleted)
-        if len(changed)>0: 
+        if len(changed) > 0:
             with conn.cursor() as cur:
                 if len(cls.table_key_fields) == 1:
                     sql = f"""
                         SELECT {cls.get_select_fields_sql()}
                         FROM {cls.table_name}
                         WHERE id = any(%s)
-                        """
+                    """
                     values = (list(changed),)
                 else:
-                    vs = '(' + ','.join(['%s' for f in cls.table_key_fields]) + ')'
+                    vs = '(' + ','.join(['%s' for _ in cls.table_key_fields]) + ')'
                     sql = f"""
                         SELECT {cls.get_select_fields_sql()}
                         FROM {cls.table_name}
                         WHERE ({','.join(cls.table_key_fields)}) in (
-                        {','.join([vs for d in changed])}
+                            {','.join([vs for _ in changed])}
                         )
-                        """
-                    values = [d[i] for d in changed for i in range(0,len(cls.table_key_fields))]
+                    """
+                    values = []
+                    for d in changed:
+                        values.extend(d)
                 cur.execute(sql, values)
                 cls.refresh_db_states(controller, cur)
+
         cls._changed.clear()
-        for id in cls._deleted:
-            task = controller.find(cls.type_id, id)
+        for obj_id in cls._deleted:
+            task = controller.find(cls.type_id, obj_id)
             if task is not None:
                 task.set_deleted()
         cls._deleted.clear()
 
     @classmethod
-    def find_or_new(cls, controller:ActiveObjectsController, id) -> DbObject:
-        obj = controller.find(cls.type_id, id)
+    def find_or_new(cls, controller: ActiveObjectsController,
+                    obj_id) -> 'DbObject':
+        """Найти существующий или создать новый объект"""
+        obj = controller.find(cls.type_id, obj_id)
         if obj is None:
-            obj = cls(controller, id)
+            obj = cls(controller, obj_id)
         return obj
 
-def get_db_state(cur, row) -> map:
+
+def get_db_state(cur, row) -> Dict:
+    """Получить состояние из строки курсора БД"""
     return {d.name: row[i] for i, d in enumerate(cur.description)}
 
-def poll_db_changes(controller:ActiveObjectsController, conn, db_object_types)->bool:
+
+def poll_db_changes(controller: ActiveObjectsController, conn,
+                    db_object_types: List[type]) -> bool:
+    """Опрос изменений в БД"""
     res = False
-    notify_keys = {t.notify_key:t for t in db_object_types}    
+    notify_keys = {t.notify_key: t for t in db_object_types if t.notify_key}
+
     for c in db_object_types:
         c._clear_changes()
+
     conn.poll()
     while conn.notifies:
         n = conn.notifies.pop()
         c = notify_keys.get(n.channel)
         if c is not None:
-            res = True     
+            res = True
             c._add_change(n.payload)
+
     for c in db_object_types:
         c._apply_changes(controller, conn)
-    return res
 
+    return res
